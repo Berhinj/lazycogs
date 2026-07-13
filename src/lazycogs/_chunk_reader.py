@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from async_geotiff import GeoTIFF, Window
@@ -30,6 +30,28 @@ if TYPE_CHECKING:
     from pyproj import CRS, Transformer
 
 logger = logging.getLogger(__name__)
+
+
+class ChunkReadError(RuntimeError):
+    """Raised when ``errors="raise"`` and a STAC item's bands fail to read.
+
+    Wraps the original exception (storage error, decode error, etc.) with
+    the item and bands that were being read. The original exception is
+    available as ``original`` and is also chained via ``__cause__``.
+    """
+
+    def __init__(
+        self,
+        item_id: str,
+        bands: list[str],
+        original: BaseException,
+    ) -> None:
+        super().__init__(
+            f"Failed to read bands {bands!r} from item {item_id!r}: {original}",
+        )
+        self.item_id = item_id
+        self.bands = bands
+        self.original = original
 
 
 @dataclass(frozen=True)
@@ -218,14 +240,6 @@ def _select_overview(geotiff: GeoTIFF, target_res: float) -> Overview | None:
     output pixel samples at least as much original detail as it represents.
     This preserves spatial variation rather than smearing it with a coarser
     overview level.
-
-    Args:
-        geotiff: Open GeoTIFF object.
-        target_res: Target pixel size in the COG's native CRS units.
-
-    Returns:
-        An ``Overview`` instance, or ``None`` to use full resolution.
-
     """
     if not geotiff.overviews:
         return None
@@ -281,19 +295,7 @@ def _native_window(
     width: int,
     height: int,
 ) -> Window | None:
-    """Compute the pixel window in a source image that covers ``bbox_native``.
-
-    Args:
-        geotiff: Full-resolution ``GeoTIFF`` or ``Overview`` to read from.
-        bbox_native: ``(minx, miny, maxx, maxy)`` in the source image's CRS.
-        width: Image width in pixels (used for bounds clamping).
-        height: Image height in pixels (used for bounds clamping).
-
-    Returns:
-        A ``Window`` clipped to the image extent, or ``None`` if the bbox
-        falls entirely outside the image.
-
-    """
+    """Compute the pixel window in a source image that covers ``bbox_native``."""
     inv = ~geotiff.transform
     minx, miny, maxx, maxy = bbox_native
 
@@ -382,7 +384,7 @@ def _apply_bands_with_warp_cache(
 ) -> dict[str, tuple[np.ndarray, float | None]]:
     """Apply warp maps to multiple band rasters, reusing maps for identical geometries.
 
-    Checks ``warp_cache`` (keyed on ``(tuple(raster.transform), src_crs.to_wkt())``)
+    Checks ``warp_cache`` (keyed on ``(tuple(raster.transform), src_crs)``)
     before computing a new warp map.  When ``warp_cache`` is shared across calls
     (e.g. across time steps in a single chunk read), warp maps for recurring tile
     geometries are computed only once.  Bands with different geometries each get
@@ -393,21 +395,6 @@ def _apply_bands_with_warp_cache(
     is shared across concurrent executor calls, two threads may both compute the
     same warp map before either stores it; this is safe because ``compute_warp_map``
     is deterministic and the duplicate result is simply overwritten.
-
-    Args:
-        band_rasters: List of ``(band_name, raster, src_crs, effective_nodata)``
-            tuples.  ``raster`` must have ``.transform`` (Affine) and ``.data``
-            (ndarray of shape ``(bands, h, w)``) attributes.
-        dst_transform: Affine transform of the destination grid.
-        dst_crs: CRS of the destination grid.
-        dst_width: Width of the destination grid in pixels.
-        dst_height: Height of the destination grid in pixels.
-        warp_cache: Optional external cache shared across calls.  When ``None``
-            a fresh local dict is used (original per-item behaviour).
-
-    Returns:
-        ``dict`` mapping band name to ``(reprojected_array, effective_nodata)``.
-
     """
     cache: dict[tuple[tuple[float, ...], CRS], WarpMap] = (
         warp_cache if warp_cache is not None else {}
@@ -455,17 +442,6 @@ async def _read_item_band(
     reads all windows concurrently, then dispatches a single thread-executor call
     that applies warp maps with caching: bands sharing the same source CRS and
     window transform reuse the same warp map.
-
-    Args:
-        item: STAC item dict containing an ``assets`` key.
-        bands: Asset keys to read from this item.
-        ctx: Per-chunk invariants (affine, CRS, dimensions, nodata, store, etc.).
-
-    Returns:
-        ``dict`` mapping band name to ``(array, effective_nodata)`` where
-        *array* has shape ``(bands, chunk_height, chunk_width)``.  Returns
-        ``None`` if no requested band overlaps the chunk.
-
     """
     # Collect hrefs for all requested bands.
     band_hrefs: dict[str, str] = {}
@@ -555,16 +531,6 @@ async def _drain_in_order(
 
     Stops early when is_done() returns True. Cancels and drains all remaining
     tasks on exit, whether done early or exhausted.
-
-    Args:
-        tasks: Pre-created asyncio tasks, in the order results should be fed.
-        on_result: Called with (index, result) for each completed task, in
-            source order. result is whatever the task returned (may be None).
-        is_done: Called after each on_result; if it returns True, remaining
-            tasks are cancelled and the function returns.
-        on_error: Called with (index, exception) for tasks that raised. The
-            task's slot is treated as None for ordering purposes.
-
     """
     task_index: dict[int, int] = {id(t): i for i, t in enumerate(tasks)}
     completed: dict[int, Any] = {}
@@ -612,8 +578,10 @@ async def read_chunk_async(  # noqa: C901
     mosaic_method_cls: type[MosaicMethodBase] | None = None,
     store: Store | None = None,
     max_concurrent_reads: int = 32,
+    _read_semaphore: asyncio.Semaphore | None = None,
     warp_cache: dict | None = None,
     path_fn: Callable[[str], str] | None = None,
+    errors: Literal["ignore", "raise"] = "raise",
 ) -> dict[str, np.ndarray]:
     """Read, reproject, and mosaic multiple bands from a list of STAC items.
 
@@ -640,12 +608,20 @@ async def read_chunk_async(  # noqa: C901
             Defaults to :class:`~lazycogs._mosaic_methods.FirstMethod`.
         store: Optional pre-configured :class:`async_geotiff.Store`
             accepted by ``GeoTIFF.open``.
-        max_concurrent_reads: Maximum number of COG reads to run concurrently.
+        max_concurrent_reads: Maximum number of item reads to run concurrently
+            when ``_read_semaphore`` is not supplied.
+        _read_semaphore: Optional caller-supplied semaphore used by backend
+            orchestration to share item-read admission across multiple
+            ``read_chunk_async`` calls in one chunk materialisation.
         warp_cache: Optional cache shared across calls for reusing warp maps
             from earlier time steps.
         path_fn: Optional callable that takes an asset HREF and returns the
             object path to use with *store*.  Forwarded to
             :func:`_read_item_band`.
+        errors: When ``"raise"`` (default), the first item whose bands fail to
+            read (e.g. a storage error) is raised as :class:`ChunkReadError`.
+            When ``"ignore"``, the failure is logged as a warning and
+            skipped instead, so its pixels keep the mosaic fill value.
 
     Returns:
         ``dict`` mapping each band name to an array of shape
@@ -674,7 +650,7 @@ async def read_chunk_async(  # noqa: C901
         warp_cache=warp_cache,
     )
 
-    semaphore = asyncio.Semaphore(max_concurrent_reads)
+    semaphore = _read_semaphore or asyncio.Semaphore(max_concurrent_reads)
     fill = nodata if nodata is not None else 0
 
     async def _guarded(item: dict) -> dict[str, tuple[np.ndarray, float | None]] | None:
@@ -704,7 +680,10 @@ async def read_chunk_async(  # noqa: C901
     def _error(idx: int, exc: BaseException) -> None:
         if isinstance(exc, ValueError):
             raise exc
-        _log_read_failure("bands", bands, items[idx].get("id", "<unknown>"), exc)
+        item_id = items[idx].get("id", "<unknown>")
+        if errors == "raise":
+            raise ChunkReadError(item_id, bands, exc) from exc
+        _log_read_failure("bands", bands, item_id, exc)
 
     await _drain_in_order(task_list, _feed, _done, _error)
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.7.0](https://github.com/developmentseed/lazycogs/compare/v0.6.2...v0.7.0) (2026-07-01)
+
+
+### Features
+
+* apply max_concurrent_reads across time steps ([#81](https://github.com/developmentseed/lazycogs/issues/81)) ([66c6309](https://github.com/developmentseed/lazycogs/commit/66c6309c358ef4e53c02a34bafd112c504bcddf6))
+* add errors arg to open, default to `raise` to catch i/o errors ([#81](https://github.com/developmentseed/lazycogs/issues/81)) ([66c6309] (https://github.com/developmentseed/lazycogs/commit/66c6309c358ef4e53c02a34bafd112c504bcddf6))
+
+## [0.6.2](https://github.com/developmentseed/lazycogs/compare/v0.6.1...v0.6.2) (2026-06-30)
+
+
+### Bug Fixes
+
+* match explain() time steps by coordinate value not indexer key ([#82](https://github.com/developmentseed/lazycogs/issues/82)) ([2ade771](https://github.com/developmentseed/lazycogs/commit/2ade771da2accdb4d807616537cd3f9c1580937e))
+
 ## [0.6.1](https://github.com/developmentseed/lazycogs/compare/v0.6.0...v0.6.1) (2026-06-26)
 
 

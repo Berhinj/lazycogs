@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from async_geotiff import GeoTIFF
@@ -309,22 +309,6 @@ def _build_time_steps(
     Queries *parquet_path* and buckets matching items by *temporal_grouper*.
     Only groups that have at least one matching item produce a time step, so
     the time axis never contains empty slices.
-
-    Args:
-        parquet_path: Path to a geoparquet file or hive-partitioned directory.
-        duckdb_client: ``DuckdbClient`` used to query the parquet source.
-        bbox: Bounding box ``[minx, miny, maxx, maxy]`` in EPSG:4326.
-        datetime: RFC 3339 datetime or range to pre-filter items.
-        filter: CQL2 filter expression (text string or JSON dict).
-        ids: List of STAC item IDs to restrict results to.
-        sortby: Sort keys forwarded to the DuckDB query.
-        temporal_grouper: Grouper that maps item datetimes to group labels,
-            datetime filter strings, and coordinate values.
-
-    Returns:
-        ``_TimeStep`` values sorted in temporal order. Each step carries the
-        coordinate value and the opaque rustac ``datetime=`` predicate.
-
     """
     filter_fields = _extract_filter_fields(filter) if filter else set()
 
@@ -372,13 +356,6 @@ def _spatial_coords_with_eager_variables(index: RasterIndex) -> Coordinates:
     This helper keeps the ``RasterIndex`` itself for spatial selection semantics
     while materialising the x/y coordinate variables as plain NumPy arrays so
     scalar coordinate loads stay scalar after chunking.
-
-    Args:
-        index: Raster index describing the output grid.
-
-    Returns:
-        Coordinates containing eager x/y variables and the original RasterIndex.
-
     """
     index_variables = index.create_variables()
     return Coordinates(
@@ -412,45 +389,11 @@ def _build_dataarray(
     store: Store | None = None,
     max_concurrent_reads: int = 32,
     path_from_href: Callable[[str], str] | None = None,
+    errors: Literal["ignore", "raise"] = "raise",
 ) -> DataArray:
     """Assemble the lazy DataArray from pre-computed parameters.
 
-    This is the shared implementation used by both :func:`open` and
-    the STAC search completes.
-
-    Args:
-        parquet_path: Path to a geoparquet file or hive-partitioned directory.
-        duckdb_client: ``DuckdbClient`` instance passed to each
-            :class:`~lazycogs._backend.MultiBandStacBackendArray` for per-chunk
-        queries.
-        resolved_bands: Ordered list of band/asset keys.
-        time_steps: Sorted temporal steps carrying xarray coordinates and
-            ``rustac``-compatible datetime filters.
-        bbox: Output bounding box in ``dst_crs``.
-        bbox_4326: Bounding box in EPSG:4326.
-        dst_crs: Target output CRS.
-        resolution: Output pixel size in ``dst_crs`` units.
-        sortby: Optional rustac sort keys.
-        filter: CQL2 filter expression forwarded to per-chunk DuckDB queries.
-        ids: STAC item IDs forwarded to per-chunk DuckDB queries.
-        nodata: No-data fill value.
-        out_dtype: Output array dtype.
-        dtype_was_explicit: Whether the caller passed ``dtype=`` explicitly.
-        nodata_was_explicit: Whether the caller passed ``nodata=`` explicitly.
-        method_cls: Mosaic method class.
-        chunks: Passed to ``DataArray.chunk()`` if not ``None``.
-        store: Pre-configured :class:`async_geotiff.Store` accepted by
-            ``GeoTIFF.open``. When provided, it is used directly for all asset
-            reads instead of resolving an obstore-backed store from each HREF.
-        max_concurrent_reads: Maximum number of COG reads to run concurrently
-            per chunk.
-        path_from_href: Optional callable ``(href: str) -> str`` passed to
-            :class:`~lazycogs._backend.MultiBandStacBackendArray`.  See
-            :func:`open` for full documentation.
-
-    Returns:
-        Lazy ``xr.DataArray`` with dimensions ``(band, time, y, x)``.
-
+    Used after startup inspection and time-step discovery have completed.
     """
     dst_affine, dst_width, dst_height = compute_output_grid(
         bbox=bbox,
@@ -478,6 +421,7 @@ def _build_dataarray(
         store=store,
         max_concurrent_reads=max_concurrent_reads,
         path_from_href=path_from_href,
+        errors=errors,
     )
     lazy = indexing.LazilyIndexedArray(multi)
     var = Variable(("band", "time", "y", "x"), lazy)
@@ -592,6 +536,7 @@ def open(  # noqa: A001
     max_concurrent_reads: int = 32,
     path_from_href: Callable[[str], str] | None = None,
     duckdb_client: DuckdbClient | None = None,
+    errors: Literal["ignore", "raise"] = "raise",
 ) -> DataArray:
     """Open a mosaic of STAC items as a lazy ``(band, time, y, x)`` DataArray.
 
@@ -633,22 +578,26 @@ def open(  # noqa: A001
             (one step per unique normalized timestamp), ``PnD`` (days),
             ``P1W`` (ISO calendar week), ``P1M`` (calendar month), ``P1Y``
             (calendar year), and ``PTnH`` (fixed hour windows). Defaults to
-            ``"P1D"`` (one step per calendar day), which preserves the previous
-            behaviour. Multi-day and multi-hour windows are aligned to an
-            epoch of 2000-01-01.
+            ``"P1D"`` (one step per calendar day). Multi-day and multi-hour
+            windows are aligned to an epoch of 2000-01-01.
         store: Pre-configured :class:`async_geotiff.Store` accepted by
             ``GeoTIFF.open`` to use for all asset reads. Useful when
             credentials, custom endpoints, or non-default options are needed
             without relying on automatic store resolution from each HREF. When
             ``None`` (default), each asset URL is parsed to create or reuse a
             shared cached obstore-backed store behind a small lock.
-        max_concurrent_reads: Maximum number of COG reads to run concurrently
-            per chunk.  Concurrency is bounded to this size with an
-            ``asyncio.Semaphore``, which bounds peak in-flight memory when a
-            chunk overlaps many files. Methods that support early exit (e.g. the default
-            :class:`~lazycogs._mosaic_methods.FirstMethod`) will stop
-            reading once every output pixel is filled, so lower values also
-            reduce unnecessary I/O on dense datasets.  Defaults to 32.
+        max_concurrent_reads: Maximum number of lazycogs item reads to run
+            concurrently within one chunk materialization, shared across all
+            selected time steps in that chunk. Concurrency is bounded to this
+            size with an ``asyncio.Semaphore``, which bounds peak in-flight
+            memory when a chunk overlaps many files. This is not a raw
+            object-store request-rate limiter: one item read can open/read
+            multiple band COGs, and underlying COG operations may issue
+            multiple range requests and retries. Methods that support early
+            exit (e.g. the default
+            :class:`~lazycogs._mosaic_methods.FirstMethod`) will stop reading
+            once every output pixel is filled, so lower values also reduce
+            unnecessary I/O on dense datasets. Defaults to 32.
         path_from_href: Optional callable ``(href: str) -> str`` that extracts
             the object path from an asset HREF.  When provided, it replaces the
             default ``urlparse``-based extraction used in
@@ -677,10 +626,8 @@ def open(  # noqa: A001
                 )
 
         duckdb_client: Optional ``DuckdbClient`` instance.  When
-            ``None`` (default), a plain ``DuckdbClient()`` is created,
-            which is equivalent to the previous ``rustac.search_sync``
-            behaviour.  Pass a custom client to enable features such as
-            hive-partitioned datasets::
+            ``None`` (default), a plain ``DuckdbClient()`` is created. Pass a
+            custom client to enable features such as hive-partitioned datasets::
 
                 import rustac, lazycogs
 
@@ -692,6 +639,16 @@ def open(  # noqa: A001
                     crs=...,
                     resolution=...,
                 )
+
+        errors: How to handle a failed item-band read during chunk
+            materialization (e.g. a storage error or rate-limit response).
+            ``"raise"`` (default) raises the first such failure as
+            :class:`~lazycogs._chunk_reader.ChunkReadError`, which wraps the
+            original exception and carries the failing ``item_id`` and
+            ``bands``. ``"ignore"`` logs a warning and leaves the mosaic fill
+            value in place for that item's pixels instead. Contract
+            violations (mismatched dtype or nodata) are always raised
+            regardless of this setting.
 
     Returns:
         Lazy ``xr.DataArray`` with dimensions ``(band, time, y, x)``.
@@ -821,4 +778,5 @@ def open(  # noqa: A001
         store=store,
         max_concurrent_reads=max_concurrent_reads,
         path_from_href=path_from_href,
+        errors=errors,
     )

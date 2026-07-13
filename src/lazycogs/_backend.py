@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from affine import Affine
@@ -65,9 +65,12 @@ class _ChunkReadPlan:
         mosaic_method_cls: Mosaic method class, or ``None`` for the default.
         store: Pre-configured :class:`async_geotiff.Store` accepted by
             ``GeoTIFF.open``, or ``None``.
-        max_concurrent_reads: Maximum concurrent COG reads per chunk.
+        max_concurrent_reads: Maximum concurrent item reads per chunk,
+            shared across selected time steps.
         warp_cache: Shared warp map cache across time steps.
         path_fn: Optional callable extracting an object path from an asset HREF.
+        errors: ``"raise"`` (default) to raise the first failed item read as
+            ``ChunkReadError``, or ``"ignore"`` to log and fill it instead.
 
     """
 
@@ -93,6 +96,7 @@ class _ChunkReadPlan:
     max_concurrent_reads: int
     warp_cache: dict
     path_fn: Callable[[str], str] | None
+    errors: Literal["ignore", "raise"]
 
 
 @dataclass
@@ -123,17 +127,7 @@ def _resolve_time_indices(
     time_key: int | np.integer | slice,
     n_time_steps: int,
 ) -> tuple[list[int], bool]:
-    """Resolve a time indexer to a list of integer indices.
-
-    Args:
-        time_key: Integer or slice indexer for the time dimension.
-        n_time_steps: Total number of time steps (size of the time dimension).
-
-    Returns:
-        ``(time_indices, squeeze_time)`` where ``squeeze_time`` is ``True``
-        when ``time_key`` was a scalar integer.
-
-    """
+    """Resolve a time indexer to a list of integer indices."""
     if isinstance(time_key, (int, np.integer)):
         return [int(time_key)], True
     start = time_key.start if time_key.start is not None else 0
@@ -146,17 +140,7 @@ def _resolve_band_indices(
     band_key: int | np.integer | slice,
     n_bands: int,
 ) -> tuple[list[int], bool]:
-    """Resolve a band indexer to a list of integer indices.
-
-    Args:
-        band_key: Integer or slice indexer for the band dimension.
-        n_bands: Total number of bands.
-
-    Returns:
-        ``(band_indices, squeeze_band)`` where ``squeeze_band`` is ``True``
-        when ``band_key`` was a scalar integer.
-
-    """
+    """Resolve a band indexer to a list of integer indices."""
     if isinstance(band_key, (int, np.integer)):
         return [int(band_key)], True
     start = band_key.start if band_key.start is not None else 0
@@ -169,16 +153,7 @@ def _search_items_sync(
     plan: _ChunkReadPlan,
     time_step: _TimeStep,
 ) -> list[Any]:
-    """Query the STAC parquet for items overlapping a chunk.
-
-    Args:
-        plan: Read plan carrying all parameters for this chunk.
-        time_step: Temporal step carrying the rustac datetime filter.
-
-    Returns:
-        List of STAC items returned by DuckDB.
-
-    """
+    """Query the STAC parquet for items overlapping a chunk."""
     label = f"bands={plan.selected_bands!r}"
     t0 = time.perf_counter()
     items = plan.duckdb_client.search(
@@ -219,14 +194,6 @@ async def _search_items_async(
     DuckDB queries serialise on a single connection internally, so this
     yields the event loop during the query but does not produce parallel
     queries against the same DuckdbClient.
-
-    Args:
-        plan: Read plan carrying all parameters for this chunk.
-        time_step: Temporal step carrying the rustac datetime filter.
-
-    Returns:
-        List of STAC items returned by DuckDB.
-
     """
     return await run_duckdb(_search_items_sync, plan, time_step)
 
@@ -234,20 +201,13 @@ async def _search_items_async(
 async def _run_one_date(
     t_idx: int,
     plan: _ChunkReadPlan,
+    read_semaphore: asyncio.Semaphore,
 ) -> dict[str, np.ndarray] | None:
     """Read and mosaic all COGs for a single time step.
 
     Issues one DuckDB query for items overlapping the chunk at this date, then
     calls read_chunk_async to fetch and reproject all tiles.
     Returns None if no items match the query.
-
-    Args:
-        t_idx: Index into ``plan.time_steps`` for the time step to read.
-        plan: Read plan carrying all parameters for this chunk.
-
-    Returns:
-        Per-band arrays keyed by band name, or ``None`` if no items matched.
-
     """
     time_step = plan.time_steps[t_idx]
     items = await _search_items_async(plan, time_step)
@@ -269,8 +229,10 @@ async def _run_one_date(
         mosaic_method_cls=plan.mosaic_method_cls,
         store=plan.store,
         max_concurrent_reads=plan.max_concurrent_reads,
+        _read_semaphore=read_semaphore,
         warp_cache=plan.warp_cache,
         path_fn=plan.path_fn,
+        errors=plan.errors,
     )
     logger.debug(
         "read_chunk_async bands=%r datetime=%s (%d items, %dx%d px) took %.3fs",
@@ -293,18 +255,15 @@ async def _read_chunk_all_dates(
     DuckDB queries run on the dedicated DuckDB executor; DuckDB itself
     serialises access on a single connection, so concurrent queries on the
     same ``DuckdbClient`` are safe but not parallel.  Mosaic coroutines for
-    all time steps are gathered concurrently so COG reads and reprojections
-    overlap across time steps.
-
-    Args:
-        time_indices: Ordered list of time-dimension indices to materialise.
-        plan: Read plan carrying all parameters for this chunk.
-
-    Returns:
-        One entry per time index; ``None`` where no items matched.
-
+    all time steps are gathered concurrently, while their item reads share one
+    chunk-local semaphore so admission is bounded across time steps.
     """
-    return list(await asyncio.gather(*[_run_one_date(t, plan) for t in time_indices]))
+    read_semaphore = asyncio.Semaphore(plan.max_concurrent_reads)
+    return list(
+        await asyncio.gather(
+            *[_run_one_date(t, plan, read_semaphore) for t in time_indices],
+        ),
+    )
 
 
 @dataclass
@@ -348,9 +307,9 @@ class MultiBandStacBackendArray(BackendArray):
             ``GeoTIFF.open`` and shared across all chunk reads. When ``None``,
             each asset HREF is resolved to an obstore-backed store via the
             shared process-local cache in :func:`~lazycogs._store.resolve`.
-        max_concurrent_reads: Maximum number of COG reads to run concurrently
-            per chunk.  Limits peak in-flight memory when a chunk overlaps
-            many items.  Defaults to 32.
+        max_concurrent_reads: Maximum number of item reads to run concurrently
+            per chunk, shared across selected time steps.  Limits peak
+            in-flight memory when a chunk overlaps many items. Defaults to 32.
         path_from_href: Optional callable ``(href: str) -> str`` that extracts
             the object path from an asset HREF.  When provided, it replaces the
             default ``urlparse``-based extraction in
@@ -358,6 +317,10 @@ class MultiBandStacBackendArray(BackendArray):
             a custom ``store`` whose root does not align with the URL structure
             of the asset HREFs (e.g. Azure Blob Storage with a container-rooted
             store).
+        errors: ``"raise"`` (default) raises the first item-read failure as
+            :class:`~lazycogs._chunk_reader.ChunkReadError`. ``"ignore"``
+            logs a warning and leaves the fill value in place when an
+            item's bands fail to read.
         shape: ``(n_bands, n_time_steps, dst_height, dst_width)``.  Derived from
             the other fields; not accepted as a constructor argument.
 
@@ -383,6 +346,7 @@ class MultiBandStacBackendArray(BackendArray):
     store: Store | None = field(default=None)
     max_concurrent_reads: int = field(default=32)
     path_from_href: Callable[[str], str] | None = field(default=None)
+    errors: Literal["ignore", "raise"] = field(default="raise")
     shape: tuple[int, ...] = field(init=False)
     _dst_to_4326: Transformer | None = field(init=False, repr=False, compare=False)
 
@@ -426,14 +390,6 @@ class MultiBandStacBackendArray(BackendArray):
 
         Computes the chunk affine transform and EPSG:4326 bounding box from
         the top-down y/x indexers.
-
-        Args:
-            y_key: Integer or slice indexer for the y dimension.
-            x_key: Integer or slice indexer for the x dimension.
-
-        Returns:
-            A :class:`_SpatialWindow` describing the chunk geometry.
-
         """
         if isinstance(y_key, (int, np.integer)):
             yi = int(y_key)
@@ -528,16 +484,7 @@ class MultiBandStacBackendArray(BackendArray):
         )
 
     def _sync_getitem(self, key: tuple[Any, ...]) -> np.ndarray:
-        """Sync adapter that runs ``_async_getitem`` on the background loop.
-
-        Args:
-            key: A tuple of ``int | slice`` objects for the
-                ``(band, time, y, x)`` dimensions.
-
-        Returns:
-            Numpy array with shape determined by the indexing key.
-
-        """
+        """Sync adapter that runs ``_async_getitem`` on the background loop."""
         return run_on_loop(self._async_getitem(key))
 
     async def _async_getitem(self, key: tuple[Any, ...]) -> np.ndarray:
@@ -548,14 +495,6 @@ class MultiBandStacBackendArray(BackendArray):
         :func:`~lazycogs._chunk_reader.read_chunk_async`, issuing a single
         DuckDB query per time step and sharing reprojection warp maps across
         bands that have identical source geometry.
-
-        Args:
-            key: A tuple of ``int | slice`` objects for the
-                ``(band, time, y, x)`` dimensions.
-
-        Returns:
-            Numpy array with shape determined by the indexing key.
-
         """
         band_key, time_key, y_key, x_key = key
 
@@ -594,6 +533,7 @@ class MultiBandStacBackendArray(BackendArray):
             max_concurrent_reads=self.max_concurrent_reads,
             warp_cache={},
             path_fn=self.path_from_href,
+            errors=self.errors,
         )
 
         all_chunk_data = await _read_chunk_all_dates(time_indices, plan)
@@ -606,8 +546,6 @@ class MultiBandStacBackendArray(BackendArray):
         )
         result: np.ndarray | None = None
 
-        expected_dims = 3
-
         for i, chunk_data in enumerate(all_chunk_data):
             if chunk_data is None:
                 continue
@@ -615,7 +553,7 @@ class MultiBandStacBackendArray(BackendArray):
                 result = np.full(out_shape, fill, dtype=self.dtype)
             for bi, band in enumerate(selected_bands):
                 arr = chunk_data[band]
-                slice_ = arr[0] if arr.ndim == expected_dims else arr
+                slice_ = arr[0] if arr.ndim == 3 else arr  # noqa: PLR2004
                 result[bi, i] = slice_.astype(self.dtype, copy=False)
 
         if result is None:
