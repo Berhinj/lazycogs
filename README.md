@@ -41,7 +41,7 @@ y label `0` is the northernmost pixel and `y[-1]` is the southernmost.  This
 matches the affine transform and is consistent with `odc-stac`, `rioxarray`, and
 GDAL.
 
-Use ``sel(y=slice(north, south))`` (high to low) for spatial subsetting.
+Use `sel(y=slice(north, south))` (high to low) for spatial subsetting.
 
 `x` and `y` keep their `RasterIndex`-based spatial selection behavior, but the
 coordinate variables themselves are materialized eagerly so chunked nearest-neighbor

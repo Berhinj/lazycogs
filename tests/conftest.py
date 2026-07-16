@@ -118,8 +118,8 @@ def _write_synthetic_cog(
 ) -> Path:
     """Write a tiled synthetic COG with four overview levels.
 
-    Pixel values are unique per pixel (``col + row * size`` plus a per-band and
-    per-``seed`` offset) so tests can tell which source pixel and band was
+    Pixel values are unique per pixel (`col + row * size` plus a per-band and
+    per-`seed` offset) so tests can tell which source pixel and band was
     sampled. The two-step recipe keeps both the full-resolution IFD and every
     overview IFD tiled, which async_geotiff requires.
 
@@ -131,11 +131,11 @@ def _write_synthetic_cog(
         maxy: Top edge (origin northing).
         epsg: CRS EPSG code.
         count: Number of bands.
-        nodata: Nodata value, or ``None`` for no nodata.
+        nodata: Nodata value, or `None` for no nodata.
         seed: Offset added to pixel values so distinct COGs differ.
 
     Returns:
-        ``cog_path``.
+        `cog_path`.
     """
     transform = Affine(native_res, 0.0, minx, 0.0, -native_res, maxy)
     crs_wkt = CRS.from_epsg(epsg).to_wkt()
@@ -211,9 +211,9 @@ def synthetic_cog(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def synthetic_cog_b(tmp_path_factory) -> Path:
-    """A second single-band COG on the same grid as ``synthetic_cog``.
+    """A second single-band COG on the same grid as `synthetic_cog`.
 
-    Different pixel values (``seed``) so a stacked ``open_item`` result carries
+    Different pixel values (`seed`) so a stacked `open_item` result carries
     distinct data per band.
     """
     return _write_synthetic_cog(
@@ -226,7 +226,7 @@ def synthetic_cog_b(tmp_path_factory) -> Path:
 def synthetic_cog_offgrid(tmp_path_factory) -> Path:
     """A single-band COG on a different grid (20 m, shifted origin).
 
-    Used to check that ``open_item`` rejects assets that do not share one
+    Used to check that `open_item` rejects assets that do not share one
     native grid.
     """
     return _write_synthetic_cog(
@@ -238,9 +238,9 @@ def synthetic_cog_offgrid(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def synthetic_cog_multiband(tmp_path_factory) -> Path:
-    """A two-band COG on the ``synthetic_cog`` grid.
+    """A two-band COG on the `synthetic_cog` grid.
 
-    Used to check that ``open_item`` rejects multi-band assets.
+    Used to check that `open_item` rejects multi-band assets.
     """
     return _write_synthetic_cog(
         tmp_path_factory.mktemp("cog_mb") / "synthetic_mb.tif",

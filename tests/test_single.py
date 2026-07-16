@@ -51,7 +51,7 @@ def test_values_loaded(native_da):
 
 
 def _item(**assets) -> dict:
-    """Build a minimal STAC item dict from ``key=cog_path`` pairs."""
+    """Build a minimal STAC item dict from `key=cog_path` pairs."""
     return {
         "assets": {
             key: {

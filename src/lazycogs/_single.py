@@ -1,14 +1,14 @@
 """Open a single COG or STAC item at native grid as an xarray DataArray.
 
-Unlike :func:`lazycogs.open`, which mosaics a whole STAC/geoparquet
+Unlike `lazycogs.open`, which mosaics a whole STAC/geoparquet
 collection onto a caller-defined output grid, this module reads assets in
 place: native CRS, native resolution, native shape, no reprojection.
 
-- :func:`open_cog` reads one Cloud-Optimized GeoTIFF — the obstore-backed
-  analogue of ``rioxarray.open_rasterio`` for a single asset.
-- :func:`open_item` reads several assets of a single STAC item that share the
-  same native grid and stacks them into one ``(band, y, x)`` DataArray whose
-  ``band`` coordinate is labelled by asset key.
+- `open_cog` reads one Cloud-Optimized GeoTIFF — the obstore-backed
+  analogue of `rioxarray.open_rasterio` for a single asset.
+- `open_item` reads several assets of a single STAC item that share the
+  same native grid and stacks them into one `(band, y, x)` DataArray whose
+  `band` coordinate is labelled by asset key.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _build_cog_dataarray(
 ) -> DataArray:
     """Wrap a native-resolution read in a rioxarray-compatible DataArray.
 
-    ``band_coord`` labels the band dimension; it defaults to 1-based integer
+    `band_coord` labels the band dimension; it defaults to 1-based integer
     band indices and is set to the asset key when stacking a STAC item.
     """
     data = raster.data
@@ -107,23 +107,23 @@ async def open_cog_async(
     store: Store | None = None,
     path_from_href: Callable[[str], str] | None = None,
 ) -> DataArray:
-    """Open one COG at native resolution as an ``(band, y, x)`` DataArray.
+    """Open one COG at native resolution as an `(band, y, x)` DataArray.
 
-    Async variant of :func:`open_cog` for use inside a running event loop.
+    Async variant of `open_cog` for use inside a running event loop.
 
     Args:
-        href: Asset URL or path. When ``store`` is ``None``, an obstore-backed
+        href: Asset URL or path. When `store` is `None`, an obstore-backed
             store is auto-resolved from the URL root; otherwise only the object
             path is extracted from the HREF.
-        store: Pre-configured :class:`async_geotiff.Store` for all reads.
-        path_from_href: Optional callable ``(href) -> path`` overriding the
-            default ``urlparse`` extraction (see :func:`lazycogs.open`).
+        store: Pre-configured `async_geotiff.Store` for all reads.
+        path_from_href: Optional callable `(href) -> path` overriding the
+            default `urlparse` extraction (see `lazycogs.open`).
 
     Returns:
         DataArray at the COG's native CRS, resolution, and shape — no
-        reprojection. Source ``nodata`` is set as ``_FillValue`` and any
-        ``scale``/``offset`` as ``scale_factor``/``add_offset`` so rioxarray's
-        ``mask_and_scale`` decoding applies them.
+        reprojection. Source `nodata` is set as `_FillValue` and any
+        `scale`/`offset` as `scale_factor`/`add_offset` so rioxarray's
+        `mask_and_scale` decoding applies them.
 
     """
     resolved_store, path = resolve(href, store=store, path_fn=path_from_href)
@@ -138,25 +138,25 @@ def open_cog(
     store: Store | None = None,
     path_from_href: Callable[[str], str] | None = None,
 ) -> DataArray:
-    """Open one COG at native resolution as an ``(band, y, x)`` DataArray.
+    """Open one COG at native resolution as an `(band, y, x)` DataArray.
 
     Reads a single Cloud-Optimized GeoTIFF in place — native CRS, resolution,
-    and shape, no reprojection or mosaicking. Use :func:`lazycogs.open` for a
+    and shape, no reprojection or mosaicking. Use `lazycogs.open` for a
     reprojected mosaic across a STAC/geoparquet collection, or
-    :func:`open_item` to stack several same-grid assets of one STAC item.
+    `open_item` to stack several same-grid assets of one STAC item.
 
     Args:
-        href: Asset URL or path. When ``store`` is ``None``, an obstore-backed
+        href: Asset URL or path. When `store` is `None`, an obstore-backed
             store is auto-resolved from the URL root; otherwise only the object
             path is extracted from the HREF.
-        store: Pre-configured :class:`async_geotiff.Store` for all reads.
-        path_from_href: Optional callable ``(href) -> path`` overriding the
-            default ``urlparse`` extraction (see :func:`lazycogs.open`).
+        store: Pre-configured `async_geotiff.Store` for all reads.
+        path_from_href: Optional callable `(href) -> path` overriding the
+            default `urlparse` extraction (see `lazycogs.open`).
 
     Returns:
         DataArray at the COG's native CRS, resolution, and shape. Source
-        ``nodata`` is set as ``_FillValue`` and any ``scale``/``offset`` as
-        ``scale_factor``/``add_offset``.
+        `nodata` is set as `_FillValue` and any `scale`/`offset` as
+        `scale_factor`/`add_offset`.
 
     """
     return run_on_loop(
@@ -165,7 +165,7 @@ def open_cog(
 
 
 def _assets_from_item(item: dict[str, Any]) -> dict[str, Any]:
-    """Return the ``assets`` mapping from a STAC item dict."""
+    """Return the `assets` mapping from a STAC item dict."""
     if hasattr(item, "to_dict"):
         item = item.to_dict()
     assets: dict[str, Any] = item.get("assets", {})
@@ -181,7 +181,7 @@ async def _read_asset_band(
     store: Store | None,
     path_from_href: Callable[[str], str] | None,
 ) -> DataArray:
-    """Open and read one single-band asset as a ``(band, y, x)`` DataArray."""
+    """Open and read one single-band asset as a `(band, y, x)` DataArray."""
     geotiff = await _open_asset(
         assets,
         band,
@@ -204,23 +204,23 @@ async def open_item_async(
     store: Store | None = None,
     path_from_href: Callable[[str], str] | None = None,
 ) -> DataArray:
-    """Open several same-grid assets of one STAC item as ``(band, y, x)``.
+    """Open several same-grid assets of one STAC item as `(band, y, x)`.
 
-    Async variant of :func:`open_item` for use inside a running event loop.
+    Async variant of `open_item` for use inside a running event loop.
 
     Args:
-        item: A STAC item as a dict (e.g. a ``rustac`` search result).
-        bands: Asset keys to include, in output order. When ``None``, the
-            item's preferred data assets are used (role ``"data"`` or media
-            type ``image/tiff``), matching :func:`lazycogs.open`.
-        store: Pre-configured :class:`async_geotiff.Store` for all reads.
-        path_from_href: Optional callable ``(href) -> path`` overriding the
-            default ``urlparse`` extraction (see :func:`lazycogs.open`).
+        item: A STAC item as a dict (e.g. a `rustac` search result).
+        bands: Asset keys to include, in output order. When `None`, the
+            item's preferred data assets are used (role `"data"` or media
+            type `image/tiff`), matching `lazycogs.open`.
+        store: Pre-configured `async_geotiff.Store` for all reads.
+        path_from_href: Optional callable `(href) -> path` overriding the
+            default `urlparse` extraction (see `lazycogs.open`).
 
     Returns:
         DataArray at the assets' shared native CRS, resolution, and shape, with
-        the ``band`` coordinate labelled by asset key. ``nodata``/``scale``/
-        ``offset`` are read from each asset file and surfaced as scalar CF
+        the `band` coordinate labelled by asset key. `nodata`/`scale`/
+        `offset` are read from each asset file and surfaced as scalar CF
         attrs only when all selected bands agree.
 
     Raises:
@@ -265,27 +265,27 @@ def open_item(
     store: Store | None = None,
     path_from_href: Callable[[str], str] | None = None,
 ) -> DataArray:
-    """Open several same-grid assets of one STAC item as ``(band, y, x)``.
+    """Open several same-grid assets of one STAC item as `(band, y, x)`.
 
     Reads the requested single-band assets of one STAC item at their native
     grid — no reprojection or mosaicking — and stacks them into a single
-    DataArray whose ``band`` coordinate is labelled by asset key. All selected
+    DataArray whose `band` coordinate is labelled by asset key. All selected
     assets must share the same native CRS, resolution, and shape. This is the
-    multi-band complement to :func:`open_cog`; use :func:`lazycogs.open` for a
+    multi-band complement to `open_cog`; use `lazycogs.open` for a
     reprojected mosaic across a whole collection.
 
     Args:
-        item: A STAC item as a dict (e.g. a ``rustac`` search result).
-        bands: Asset keys to include, in output order. When ``None``, the
-            item's preferred data assets are used (role ``"data"`` or media
-            type ``image/tiff``), matching :func:`lazycogs.open`.
-        store: Pre-configured :class:`async_geotiff.Store` for all reads.
-        path_from_href: Optional callable ``(href) -> path`` overriding the
-            default ``urlparse`` extraction (see :func:`lazycogs.open`).
+        item: A STAC item as a dict (e.g. a `rustac` search result).
+        bands: Asset keys to include, in output order. When `None`, the
+            item's preferred data assets are used (role `"data"` or media
+            type `image/tiff`), matching `lazycogs.open`.
+        store: Pre-configured `async_geotiff.Store` for all reads.
+        path_from_href: Optional callable `(href) -> path` overriding the
+            default `urlparse` extraction (see `lazycogs.open`).
 
     Returns:
         DataArray at the assets' shared native CRS, resolution, and shape, with
-        the ``band`` coordinate labelled by asset key.
+        the `band` coordinate labelled by asset key.
 
     Raises:
         ValueError: If the item has no assets, a requested band is missing or
